@@ -207,10 +207,10 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
     if (plots):
         plt.figure(figsize=(12,4))
         gs = gridspec.GridSpec(2, 3, width_ratios=[1, 1, 1])
-        bmin = 1e-12 # For bipole regions
-        bmax = 200 # For plotting
+        bmax = 200
 
     cnt = 0
+    bmin = 1e-12 # For bipole regions
     # Loop through each region:
     for k1, sharp1 in enumerate(dat['SHARP']):
         print(k1, sharp1)
@@ -268,7 +268,7 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
                 npix2bd = np.sum(reg2bd)
 
                 # - If this is greater than overlap_threshold, record and plot:
-                if ((olap > repeat_threshold) &( npix1b*npix2bd > 0)):
+                if ((olap > repeat_threshold) & (npix1b*npix2bd > 0)):
                 
                     if (plots):
                         # Load corresponding HMI synoptic maps for context:
