@@ -280,7 +280,7 @@ def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smo
         allfile.write('SHARPs from %s to %s\n' % (t_start, t_end))
         allfile.write('Grid resolution: %i x %i, smoothing_param = %i\n' % (ns, nph, sharps_smoothing))
         allfile.write('Selection criteria: (i) sep > %g deg,  (ii) |imbalance| <  %g\n' % (np.rad2deg(dph), imbalance_threshold))
-        allfile.write('%i\n' % len(sharps))
+        allfile.write('\n')
         allfile.write('SHARP\tNOAA\tCM time\t\tLatitude\tCarr-Longitude\tUnsgnd flux\tImbalance\tGood\tDipole\t\tBip-Separation\tBip-Tilt\tBip-Dipole\n')
         krestart = 0
 
@@ -364,7 +364,7 @@ def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smo
     allfile.close()
     
 #--------------------------------------------------------------------------------
-def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repeatpairs.txt', plots=True, bmin=1e-12):
+def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repeatpairs.txt', plots=True, bmin=1e-12, t_restart=''):
     """
     Reads data file produced by get_bmrs, identifies pairs of repeat regions, and saves list of their numbers to text file.
     """
@@ -377,9 +377,6 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
     times = [datetime.datetime.strptime(d.decode("utf-8") , '%Y-%m-%d') for d in dat['CM time']]
 
     # Prepare new ASCII file:
-    repeatfile = open(outputpath+outfile, 'w')
-    repeatfile.write('List of pairs of repeat SHARPs with repeat_threshold=%g\n' % repeat_threshold)
-    repeatfile.write('-- Produced by anthony.yeates[at]durham.ac.uk --\n')
 
     if (plots):
         plt.figure(figsize=(12,4))
@@ -403,6 +400,15 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
     
     cnt = 0
     
+    # If not restarting, set initial time and initialise ASCII file:
+    if (t_restart==''):
+        t_restart = np.min(times)
+        repeatfile = open(outputpath+outfile, 'w')
+        repeatfile.write('List of pairs of repeat SHARPs with repeat_threshold=%g\n' % repeat_threshold)
+        repeatfile.write('-- Produced by anthony.yeates[at]durham.ac.uk --\n')
+    else:
+        repeatfile = open(outputpath+outfile, 'a')
+
     # Loop through each region:
     for k1, sharp1 in enumerate(dat['SHARP']):
         print(sharp1)
@@ -417,7 +423,7 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
 
         for k2 in range(k1+1, len(dat)):
             # Select regions later in list with CM passage from 20 to 34 days later:
-            if ((times[k2] - times[k1] >= datetime.timedelta(days=20)) & (times[k2] - times[k1] <= datetime.timedelta(days=34))):
+            if ((times[k2] > t_restart) & (times[k2] - times[k1] >= datetime.timedelta(days=20)) & (times[k2] - times[k1] <= datetime.timedelta(days=34))):
                 
                 sharp2 = dat['SHARP'][k2]
             
