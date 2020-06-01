@@ -192,7 +192,7 @@ def derotate(map, days):
     return map1
     
 #--------------------------------------------------------------------------------
-def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repeatpairs.txt', plots=True):
+def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repeatpairs.txt', plots=True, bmin=1e-12):
     
     # Read "good" data (i.e. ones with BMRs):
     dat = np.loadtxt(outputpath+sharpsfile, skiprows=5, delimiter='\t', dtype={'names':('SHARP', 'NOAA', 'CM time', 'Latitude', 'Carr-Longitude', 'Unsgnd flux', 'Imbalance', 'Good', 'Dipole', 'Bip-Separation', 'Bip-Tilt', 'Bip-Dipole'), 'formats':('i4', 'i4', 'S10', 'f8', 'f8', 'f8', 'f8', 'i4', 'f8', 'f8', 'f8', 'f8')})
@@ -208,9 +208,24 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
         plt.figure(figsize=(12,4))
         gs = gridspec.GridSpec(2, 3, width_ratios=[1, 1, 1])
         bmax = 200
-
+        # - Choose plotting boundaries:
+        pmin = 0
+        pmax = 360
+        smin = -1
+        smax = 1
+        # - get coordinates:
+        f = netcdf.netcdf_file(outputpath+'sharp%5.5i.nc' % dat['SHARP'][0], 'r', mmap=False)
+        br = f.variables['br'][:]
+        f.close()
+        ns, nph = np.shape(br)
+        del(br)
+        ds = 2.0/ns
+        dp = 2*np.pi/nph
+        sc = np.linspace(-1 + 0.5*ds, 1 - 0.5*ds, ns)
+        pc = np.linspace(0.5*dp, 2*np.pi - 0.5*dp, nph)
+    
     cnt = 0
-    bmin = 1e-12 # For bipole regions
+    
     # Loop through each region:
     for k1, sharp1 in enumerate(dat['SHARP']):
         print(k1, sharp1)
@@ -219,17 +234,10 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
         br1 = f.variables['br'][:]
         br1b = f.variables['br_bipole'][:]
         f.close()
-        reg1 = (np.abs(br1) > 1e-12).astype('float')
+        reg1 = (np.abs(br1) > bmin).astype('float')
         reg1b = (np.abs(br1b) > bmin).astype('float')
+        flux1 = np.sum(np.abs(br1))
 
-        # Get coordinates for plotting:
-        if (plots):
-            ns, nph = np.shape(br1)
-            ds = 2.0/ns
-            dp = 2*np.pi/nph
-            sc = np.linspace(-1 + 0.5*ds, 1 - 0.5*ds, ns)
-            pc = np.linspace(0.5*dp, 2*np.pi - 0.5*dp, nph)
-        
         for k2 in range(k1+1, len(dat)):
             # Select regions later in list with CM passage from 20 to 34 days later:
             if ((times[k2] - times[k1] >= datetime.timedelta(days=20)) & (times[k2] - times[k1] <= datetime.timedelta(days=34))):
@@ -241,32 +249,26 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
                 br2 = f.variables['br'][:]
                 br2b = f.variables['br_bipole'][:]
                 f.close()
-                reg2 = (np.abs(br2) > 1e-12).astype('float')
+                reg2 = (np.abs(br2) > bmin).astype('float')
+                flux2 = np.sum(np.abs(br2))
+
+                if (flux2 > flux1):
+                    continue
 
                 # - Rotate back differentially:
                 dt = (times[k2] - times[k1]).days
                 br2d = derotate(br2, times[k2] - times[k1])
-                br2bd = derotate(br2b, times[k2] - times[k1])
-                reg2bd = (np.abs(br2bd) > bmin).astype('float')
+                reg2d = (np.abs(br2d) > bmin).astype('float')
 
-                # - Choose plotting boundaries:
-                pmin = 0
-                pmax = 360
-                smin = -1
-                smax = 1
-                
                 # - Flux of BMR 1 in derotated BMR 2:
-                ofluxb1 = np.sum(np.abs(br1b)*reg2bd)*ds*dp*6.96e10**2
-               
-                flux1 = np.sum(np.abs(br1))*ds*dp*6.96e10**2
-                flux2 = np.sum(np.abs(br2))*ds*dp*6.96e10**2
+                ofluxb1 = np.sum(np.abs(br1)*reg2d)
 
                 olap = ofluxb1/flux2
                 
                 # - Get number of pixels in BMR representations
-                npix1b = np.sum(reg1b)
-                npix2bd = np.sum(reg2bd)
-
+                npix1b = np.sum(reg1)
+                npix2bd = np.sum(reg2d)
+                
                 # - If this is greater than overlap_threshold, record and plot:
                 if ((olap > repeat_threshold) & (npix1b*npix2bd > 0)):
                 
@@ -295,8 +297,8 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
                         ax = plt.subplot(gs[2])
                         pm = ax.pcolormesh(np.rad2deg(pc), sc, br1b, cmap='bwr')
                         pm.set_clim(vmin=-bmax, vmax=bmax)
-                        ax.text(pmin+1./36*(pmax-pmin), smax-0.1*(smax-smin), r'(c) $\Phi$ = %6.2e' % flux1)
-                        plt.contour(np.rad2deg(pc), sc, reg2bd, [0.5], colors='k', linewidths=0.75, linestyles='--')
+                        ax.text(pmin+1./36*(pmax-pmin), smax-0.1*(smax-smin), r'(c) $\Phi$ = %6.2e' % (flux1*ds*dp*6.96e10**2))
+                        # plt.contour(np.rad2deg(pc), sc, reg2bd, [0.5], colors='k', linewidths=0.75, linestyles='--')
                         ax.text(pmin+1./36*(pmax-pmin), smax-0.95*(smax-smin), r'$R_{12}$ = %4.2f' % olap)
                         ax.set_xlim(pmin, pmax)
                         ax.set_ylim(smin, smax)
@@ -318,18 +320,19 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
                         ax.set_ylim(smin, smax)
                         
                         ax = plt.subplot(gs[5])
+                        br2bd = derotate(br2b, times[k2] - times[k1])
                         pm = ax.pcolormesh(np.rad2deg(pc), sc, br2bd, cmap='bwr')
                         pm.set_clim(vmin=-bmax, vmax=bmax)
-                        ax.text(pmin+1./36*(pmax-pmin), smax-0.1*(smax-smin), r'(f) $\Phi$ = %6.2e' % flux2)
+                        ax.text(pmin+1./36*(pmax-pmin), smax-0.1*(smax-smin), r'(f) $\Phi$ = %6.2e' % (flux2*ds*dp*6.96e10**2))
                         ax.set_xlabel('Carrington Longitude')
                         ax.set_xlim(pmin, pmax)
                         ax.set_ylim(smin, smax)
                     
-                        plt.savefig(outputpath+'repeat_%5.5i.png' % cnt, bbox_inches='tight')
+                        plt.savefig(outputpath+'repeat1_%5.5i.png' % cnt, bbox_inches='tight')
                     
                         plt.clf()
                     
-                    cnt += 1
+                        cnt += 1
                     
                     # Output to list of repeat regions:
                     repeatfile.write('%i\t%i\n' % (sharp1, sharp2))
