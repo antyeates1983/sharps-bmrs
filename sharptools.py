@@ -412,22 +412,26 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
     # Loop through each region:
     for k1, sharp1 in enumerate(dat['SHARP']):
         print(sharp1)
-        # Load footprint of region on computational grid:
-        f = netcdf.netcdf_file(outputpath+'sharp%5.5i.nc' % sharp1, 'r', mmap=False)
-        br1 = f.variables['br'][:]
-        br1b = f.variables['br_bipole'][:]
-        f.close()
-        reg1 = (np.abs(br1) > bmin).astype('float')
-        reg1b = (np.abs(br1b) > bmin).astype('float')
-        flux1 = np.sum(np.abs(br1))
-
+    
+        loaded1 = False
         for k2 in range(k1+1, len(dat)):
             # Select regions later in list with CM passage from 20 to 34 days later:
             if ((times[k2] > t_restart) & (times[k2] - times[k1] >= datetime.timedelta(days=20)) & (times[k2] - times[k1] <= datetime.timedelta(days=34))):
                 
                 sharp2 = dat['SHARP'][k2]
             
-                # - Load footprint of region on computational grid:
+                # - Load footprints of regions on computational grid:
+                if (loaded1==False):
+                    # Load footprint of region on computational grid:
+                    f = netcdf.netcdf_file(outputpath+'sharp%5.5i.nc' % sharp1, 'r', mmap=False)
+                    br1 = f.variables['br'][:]
+                    br1b = f.variables['br_bipole'][:]
+                    f.close()
+                    reg1 = (np.abs(br1) > bmin).astype('float')
+                    reg1b = (np.abs(br1b) > bmin).astype('float')
+                    flux1 = np.sum(np.abs(br1))
+                    loaded1 = True
+                    
                 f = netcdf.netcdf_file(outputpath+'sharp%5.5i.nc' % sharp2, 'r', mmap=False)
                 br2 = f.variables['br'][:]
                 br2b = f.variables['br_bipole'][:]
