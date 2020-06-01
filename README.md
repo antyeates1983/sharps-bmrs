@@ -9,6 +9,10 @@ Full details of the purpose and design of the code are given in the paper <a hre
 
 If you just want to use the BMR data without downloading and running the Python code, a version of `bmrharps_evol.txt` (see below) is maintained at the <a href="">Solar Dynamo Dataverse</a>.
 
+## Credit
+
+If you use the code or the derived data in your published work, please cite the accompanying paper [under review].
+
 ## Dependencies
 
 The code is tested with Python 3.7.3. The only nonstandard libraries required are astropy, sunpy and drms.
