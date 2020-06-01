@@ -617,8 +617,12 @@ class SFT1:
         dt_mf = np.min(self.ds/np.abs(self.vs))
         dt = cfl*min([dt_eta, dt_mf])
         # - modify to fit exactly into one day:
-        self.ndt = int(86400./dt)
-        self.dt = 86400.0/self.ndt
+        if (dt < 86400):
+            self.ndt = int(86400.0/dt)
+            self.dt = 86400.0/self.ndt
+        else:
+            self.ndt = 1
+            self.dt = 86400.0
         print('Timestep dt = %g secs' % self.dt)
         
         # Include factor sin(theta) in vs:
