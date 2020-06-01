@@ -1,12 +1,7 @@
 """
     Main script to generate a list of BMRs (bipolar magnetic regions) from HMI/SHARPs data.
     
-    Interpolates original map to equally-spaced grid in sin(latitude) and longitude for computation of the BMR properties. The resolution and degree of smoothing in this interpolation can be modified.
-    
-    Output:
-    outputpath/allsharps.txt - list of all SHARPs whether selected or not
-    
-    A.R Yeates, Durham University, 29/5/20
+    A.R Yeates, Durham University, 1/6/20
 """
 import os
 import datetime

@@ -1,7 +1,7 @@
 """
     Python module with routines associated to sharps-bmrs.
     
-    A.R. Yeates, Durham University, 29/5/20
+    A.R. Yeates, Durham University, 1/6/20
 """
 import sys
 import numpy as np
@@ -19,33 +19,234 @@ import datetime
 import pickle
 
 #--------------------------------------------------------------------------------
-def get_sharps(outputpath, t_start, t_end, restart=True):
-
-    #-----------------------------------------------------------
-    # Start time:
-    cr_start = int(carrington_rotation_number(t_start))
-
-    #-----------------------------------------------------------
-    # Identify all SHARP regions present within simulation timeframe:
-    # [cache in pickle file for later use]
-    try:
-        if (restart):
-            picklefile = open(outputpath+'sharps.p','rb')
-            picklefile.close()
-            print('Reading pre-computed SHARPs from sharps.p')
-    except:
-        restart = False
-    
-    if (restart == False):
-        sharps, t_rec, t_em = getSHARPs(t_start, t_end)
-        picklefile1 = open(outputpath+'sharps.p','wb')
-        pickle.dump(sharps, picklefile1)
-        pickle.dump(t_rec, picklefile1)
-        pickle.dump(t_em, picklefile1)
-        picklefile1.close()
+def bmr2d(sc, pc, lat0, lon0, sep0, tilt0, B0, xithresh=9):
+    """
+        Return magnetic field for 2d tilted magnetic bipole with peak strength B0.
+        **Note that all input angles should be in radians.
         
+        In an untilted frame where the bipole is at the equator it has the form
+        Br = -B0*(lon/sep0)*exp[ 0.5*( 1 - xi )]
+        where xi = (lon**2 + 2*lat**2)/sep0**2
+        where the strength B1 is chosen so that the maximum of Br is B0.
+        
+        Note: cutoff based on threshold of xi.
+    """
+    
+    ns = np.size(sc)
+    nph = np.size(pc)
+    ds = sc[1] - sc[0]
+    dp = pc[1] - pc[0]
+    sc2, pc2 = np.meshgrid(sc, pc, indexing='ij')
+    sinc2 = np.sqrt(1 - sc2**2)
+    
+    # Cartesian coordinates:
+    x = np.cos(pc2)*sinc2
+    y = np.sin(pc2)*sinc2
+    z = sc2
+    
+    # Rotate to frame where BMR is on equator and untilted:
+    xb = x*np.cos(lat0)*np.cos(lon0) + y*np.cos(lat0)*np.sin(lon0) + z*np.sin(lat0)
+    yb = x*(-np.cos(tilt0)*np.sin(lon0) + np.sin(tilt0)*np.sin(lat0)*np.cos(lon0)) + y*(np.cos(tilt0)*np.cos(lon0) + np.sin(tilt0)*np.sin(lat0)*np.sin(lon0)) - z*np.sin(tilt0)*np.cos(lat0)
+    zb = x*(-np.sin(tilt0)*np.sin(lon0) - np.cos(tilt0)*np.sin(lat0)*np.cos(lon0)) + y*(np.sin(tilt0)*np.cos(lon0)-np.cos(tilt0)*np.sin(lat0)*np.sin(lon0)) + z*np.cos(tilt0)*np.cos(lat0)
+    zb[zb > 1] = 1
+    zb[zb < -1] = -1
+    
+    # Magnetic field of BMR in this frame:
+    thb = np.arccos(zb)
+    phb = np.arctan2(yb, xb)
+    xi = (phb**2 + 2*(0.5*np.pi-thb)**2)/sep0**2
+    brb = -B0*phb/sep0*np.exp(-xi)
+    
+    # Cutoff at threshold:
+    brb[xi > xithresh] = 0
+    msk = (xi <= xithresh).astype('int')
+    
+    # Remove any flux imbalance:
+    brb = correct_flux_multiplicative(brb)
+    
+    return brb, msk
+    
+#--------------------------------------------------------------------------------
+def correct_flux_multiplicative(f):
+    """
+        Corrects the flux balance in the map f (assumes that cells have equal area).
+    """
+    
+    # Compute positive and negative fluxes:
+    ipos = f > 0
+    ineg = f < 0
+    fluxp = np.abs(np.sum(f[ipos]))
+    fluxn = np.abs(np.sum(f[ineg]))
+    
+    # Rescale both polarities to mean:
+    fluxmn = 0.5*(fluxn + fluxp)
+    f1 = f.copy()
+    f1[ineg] *= fluxmn/fluxn
+    f1[ipos] *= fluxmn/fluxp
+    
+    return f1
+    
+#--------------------------------------------------------------------------------
+def derotate(map, days):
+    """
+    Derotates 2D br map on computational grid according to differential rotation over period
+    given by "days" argument.
+    """
+    # Coordinates:
+    ns, nph = np.shape(map)
+    ds = 2.0/ns
+    dp = 2*np.pi/nph
+    sc = np.linspace(-1 + 0.5*ds, 1 - 0.5*ds, ns)
+    # Interpolator for original map (add ghost cells for periodicity):
+    pcm = np.linspace(-0.5*dp, 2*np.pi + 0.5*dp, nph+2)
+    mapm = np.zeros((ns, nph+2))
+    mapm[:,1:-1] = map
+    mapm[:,0] = mapm[:,-2]
+    mapm[:,-1] = mapm[:,1]
+    mapi = interp2d(pcm, sc, mapm, kind='linear', copy=True, bounds_error=False, fill_value=0)
+    # Differential rotation profile:
+    omA = np.deg2rad(0.18)
+    omB = -np.deg2rad(2.396)
+    omC = -np.deg2rad(1.787)
+    om = omA + omB*sc**2 + omC*sc**4
+    # Rotate back in time by "days":
+    map1 = map*0
+    for j in range(ns):
+        pc1 = (pcm[1:-1] + om[j]*days.days + 2*np.pi) % (2*np.pi)
+        for k in range(nph):
+            map1[j,k] = mapi(pc1[k], sc[j]).flatten()
+        # THE FOR LOOP SLOWS IT DOWN BUT HAVEN'T SUCCEEDED IN VECTORISING IT
+    return map1
+    
+#--------------------------------------------------------------------------------
+def evolve_forward(outputpath, sharpsfile, repeatfile, eta=466.8, v0=15.5e-3, p=2.33, outfile='bmrsharps_evol.txt', plots=True):
+    """
+    Reads list of regions from get_bmrs and list of repeats from get_pair_overlaps, selects only
+    "good" regions that are not repeats, and evolves them forward in time according to the SFT model.
+    """
+    # GET LIST OF GOOD SHARPS:
+    # - read full data:
+    dat0 = np.loadtxt(outputpath+sharpsfile, skiprows=5, delimiter='\t', dtype={'names':('SHARP', 'NOAA', 'CM time', 'Latitude', 'Carr-Longitude', 'Unsgnd flux', 'Imbalance', 'Good', 'Dipole', 'Bip-Separation', 'Bip-Tilt', 'Bip-Dipole'), 'formats':('i4', 'i4', 'S10', 'f8', 'f8', 'f8', 'f8', 'i4', 'f8', 'f8', 'f8', 'f8')})
+
+    t0 = np.array([datetime.datetime.strptime(dat0['CM time'][i].decode('UTF-8'), '%Y-%m-%d') for i in range(len(dat0))])
+    years0 = np.array([tt.year for tt in t0])
+    # - remove bad regions:
+    t1 = t0[dat0['Good']==1]
+    years1 = years0[dat0['Good']==1]
+    dat1 = dat0[dat0['Good']==1]
+    # - remove repeats:
+    repdat = np.loadtxt(outputpath+repeatfile, skiprows=2, delimiter='\t', dtype={'names':('reg1', 'reg2'), 'formats':('i4', 'i4')})
+    uniq = np.full(np.size(t1), True)
+    for k, sharpnum in enumerate(dat1['SHARP']):
+        if np.isin(sharpnum, repdat['reg2']):   # repeated region
+            uniq[k] = False
+    t = t1[uniq]
+    years = years1[uniq]
+    dat = dat1[uniq]
+
+    sharps = ['sharp%5.5i.nc' % k for k in dat['SHARP']]
+    sharps.sort()
+    print('Evolving %i regions forward by SFT.' % len(sharps))
+     
+    # Read in first region file to get resolution and set up flux transport object:
+    fh = netcdf.netcdf_file(outputpath+sharps[0], 'r', mmap=False)
+    br0 = fh.variables['br'][:]
+    fh.close()
+    ns, nph = np.shape(br0)
+
+    sft = SFT1(ns)
+    sftbip = SFT1(ns)
+
+    # Initialize meridional flow, diffusion and decay:
+    tau = 0
+    def vs(s, v0=v0, p=p):
+        Du = v0*(1+p)**(0.5*(p+1))/p**(0.5*p)
+        return Du*s*(np.sqrt(1 - s**2))**p
+    sft.prep_sft(vs, eta, tau)
+    sftbip.prep_sft(vs, eta, tau)
+
+    # Prepare new ASCII file:
+    # - Load previous ASCII file:
+    dat = np.loadtxt(outputpath+sharpsfile, skiprows=5, usecols=(0,1,2,3,4,5,6,7,8,9,10,11), delimiter='\t', dtype={'names':('SHARP', 'NOAA', 'CM time', 'Latitude', 'Carr-Longitude', 'Unsgnd flux', 'Imbalance', 'Good', 'Dipole', 'Bip-Separation', 'Bip-Tilt', 'Bip-Dipole'), 'formats':('i4', 'i4', 'S10', 'f8', 'f8', 'f8', 'f8', 'i4', 'f8', 'f8', 'f8', 'f8')})
+    # - Get header rows:
+    with open(outputpath+sharpsfile) as myfile:
+        heads = [next(myfile) for x in range(5)]
+    # - Create new ASCII file incorporating evolution information:
+    newfile = open(outputpath+outfile, 'w')
+    newfile.write(heads[0])
+    newfile.write('-- Produced by anthony.yeates[at]durham.ac.uk --\n')
+    newfile.write('%i\n' % (len(sharps)))
+    newfile.write(heads[1])
+    newfile.write(heads[2])
+    newfile.write('Last two columns use 10-year 1D SFT simulation with eta=%g km^2/s, v0=%g km/s, p=%g, no decay term.\n' % (eta, v0, p))
+    newfile.write('------------------------------------------------------\n')
+    heads[4] = 'SHARP\tNOAA\tCM time\t\tLatitude\tCarr-Longitude\tUnsgnd flux\tImbalance\tDipole\t\tBip-Separation\tBip-Tilt\tBip-Dipole\n'  # remove Good column
+    newfile.write(heads[4][:-1]+'\tPred-Dip-Real\tPred-Dip-Bip\n')
+
+    # Run simulations for each good SHARP:
+    for sharp in sharps:
+        fh = netcdf.netcdf_file(outputpath+sharp, 'r', mmap=False)
+        try:
+            brb = fh.variables['br_bipole'][:]
+            print(sharp)
+            good = True   # a bipole array was only created if it was a "good" SHARP
+        except:
+            good = False
+        if (good):
+            # Simulate evolution of bipole approximation:
+            sftbip.setbr(np.mean(brb, axis=1))
+                   
+            Dmbip = [1.5*np.sum(sftbip.br*sftbip.sc*sftbip.ds)]
+            for k in range(10*365):
+                sftbip.evolve(sftbip.ndt*1)
+                Dmbip.append(1.5*np.sum(sftbip.br*sftbip.sc*sftbip.ds))
+                
+            # Simulate evolution of original region:
+            br0 = fh.variables['br'][:]
+            sft.setbr(np.mean(br0, axis=1))
+            Dm = [1.5*np.sum(sft.br*sft.sc*sft.ds)]
+            t = [0]
+            for k in range(10*365):
+                sft.evolve(sft.ndt*1)
+                Dm.append(1.5*np.sum(sft.br*sft.sc*sft.ds))
+                t.append(k/365.)
+                
+            if (plots):
+                plt.figure(figsize=(6,4))
+                plt.plot(t, Dm, 'tab:blue', label='Original Br')
+                plt.plot(t, Dmbip, 'tab:red', label='Bipole')
+                dmax = max([np.max(np.abs(Dm)), np.max(np.abs(Dmbip))])
+                plt.ylim(-dmax, dmax)
+                plt.xlim(t[0], t[-1])
+                plt.plot([t[0], t[-1]], [0,0], 'k-', linewidth=0.5)
+                plt.xlabel('Years')
+                plt.ylabel('Dipole')
+                plt.title('SHARP '+sharp[5:10])
+                plt.legend()
+                plt.savefig(outputpath+'Devol_'+sharp[5:10]+'.png', bbox_inches='tight')
+            
+            Df = Dm[-1]
+            Dfbip = Dmbip[-1]
+        else:
+            Df = 0
+            Dfbip = 0
+        
+        k = np.where(dat['SHARP'] == int(sharp[5:10]))[0]
+        newfile.write('%i\t%i\t%s\t%8.5f\t%8.5f\t%8.5e\t%8.5f\t%8.5e\t%8.5e\t%8.5e\t%8.5e\t%8.5e\t%8.5e\n' % (dat['SHARP'][k], dat['NOAA'][k], dat['CM time'][k][0].decode('UTF-8'), dat['Latitude'][k], dat['Carr-Longitude'][k], dat['Unsgnd flux'][k], dat['Imbalance'][k], dat['Dipole'][k], dat['Bip-Separation'][k], dat['Bip-Tilt'][k], dat['Bip-Dipole'][k], Df, Dfbip))
+
+        fh.close()
+        
+    newfile.close()
+
+    
 #--------------------------------------------------------------------------------
 def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smoothing=4, imbalance_threshold=0.5, bmr_a=0.56, restart=True, plots=False):
+    """
+    Read magnetograms for list of SHARPs in pre-existing pickle file, and fit BMRs to those
+    that are "good" (see paper). Saves output to text file.
+    """
+    
+    print('Reading SHARP list and fitting BMRs...')
 
     picklefile = open(outputpath+'sharps.p','rb')
     sharps = pickle.load(picklefile)
@@ -72,7 +273,6 @@ def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smo
             allfile = open(outputpath+outputfile, 'a')
             print('Continuing existing file...')
             krestart = count - 5
-            print(count)
     except:
         restart = False
     if (restart == False):
@@ -112,6 +312,7 @@ def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smo
         lon0 = phcen - np.pi + pcen1
         sep0 = np.arccos(spos*sneg + np.sqrt(1-spos**2)*np.sqrt(1-sneg**2)*np.cos(phpos - phneg))
         tilt0 = np.arctan2(np.arcsin(spos)-np.arcsin(sneg), np.sqrt(1-scen**2)*(phneg - phpos))
+        # - select "good" regions:
         if (~np.isnan(sep0) & (sep0 >= dph) & (np.abs(imbalance) < imbalance_threshold)):
             brb, msk = bmr2d(sc, pc, lat0, lon0, bmr_a*sep0, tilt0, 1, xithresh=9)
             brb *= flux1/np.sum(np.abs(brb))
@@ -122,7 +323,6 @@ def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smo
             good = False
         # - output data for this SHARP:
         allfile.write('%i\t%i\t%s\t%8.5f\t%8.5f\t%8.5e\t%8.5f\t%1.1i\t%8.5e\t%8.5e\t%8.5e\t%8.5e\n' % (sharps[k], keys.NOAA_AR, t_em[k].strftime('%Y-%m-%d'), np.rad2deg(lat1), np.rad2deg(ph1), flux1*ds*dph*R**2, imbalance, int(good), ax_sharp, np.rad2deg(sep0), np.rad2deg(tilt0), ax_bmr))
-        # - select only BMRs where sep0 is larger than the grid spacing (in future could use axial dipole comparison to help selection):
         # Rotate br to correct longitude:
         br1 = np.roll(br1, int((pcen1 - np.pi)/dph), axis=1)
         # Plot region:
@@ -164,35 +364,12 @@ def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smo
     allfile.close()
     
 #--------------------------------------------------------------------------------
-def derotate(map, days):
-    # Coordinates:
-    ns, nph = np.shape(map)
-    ds = 2.0/ns
-    dp = 2*np.pi/nph
-    sc = np.linspace(-1 + 0.5*ds, 1 - 0.5*ds, ns)
-    # Interpolator for original map (add ghost cells for periodicity):
-    pcm = np.linspace(-0.5*dp, 2*np.pi + 0.5*dp, nph+2)
-    mapm = np.zeros((ns, nph+2))
-    mapm[:,1:-1] = map
-    mapm[:,0] = mapm[:,-2]
-    mapm[:,-1] = mapm[:,1]
-    mapi = interp2d(pcm, sc, mapm, kind='linear', copy=True, bounds_error=False, fill_value=0)
-    # Differential rotation profile:
-    omA = np.deg2rad(0.18)
-    omB = -np.deg2rad(2.396)
-    omC = -np.deg2rad(1.787)
-    om = omA + omB*sc**2 + omC*sc**4
-    # Rotate back in time by "days":
-    map1 = map*0
-    for j in range(ns):
-        pc1 = (pcm[1:-1] + om[j]*days.days + 2*np.pi) % (2*np.pi)
-        for k in range(nph):
-            map1[j,k] = mapi(pc1[k], sc[j]).flatten()
-        # THE FOR LOOP SLOWS IT DOWN BUT HAVEN'T SUCCEEDED IN VECTORISING IT
-    return map1
-    
-#--------------------------------------------------------------------------------
 def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repeatpairs.txt', plots=True, bmin=1e-12):
+    """
+    Reads data file produced by get_bmrs, identifies pairs of repeat regions, and saves list of their numbers to text file.
+    """
+    
+    print('Identifying repeat regions...')
     
     # Read "good" data (i.e. ones with BMRs):
     dat = np.loadtxt(outputpath+sharpsfile, skiprows=5, delimiter='\t', dtype={'names':('SHARP', 'NOAA', 'CM time', 'Latitude', 'Carr-Longitude', 'Unsgnd flux', 'Imbalance', 'Good', 'Dipole', 'Bip-Separation', 'Bip-Tilt', 'Bip-Dipole'), 'formats':('i4', 'i4', 'S10', 'f8', 'f8', 'f8', 'f8', 'i4', 'f8', 'f8', 'f8', 'f8')})
@@ -228,7 +405,7 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
     
     # Loop through each region:
     for k1, sharp1 in enumerate(dat['SHARP']):
-        print(k1, sharp1)
+        print(sharp1)
         # Load footprint of region on computational grid:
         f = netcdf.netcdf_file(outputpath+'sharp%5.5i.nc' % sharp1, 'r', mmap=False)
         br1 = f.variables['br'][:]
@@ -337,75 +514,33 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
                     # Output to list of repeat regions:
                     repeatfile.write('%i\t%i\n' % (sharp1, sharp2))
     repeatfile.close()
-
+    
 #--------------------------------------------------------------------------------
-def correct_flux_multiplicative(f):
+def get_sharps(outputpath, t_start, t_end, restart=True):
     """
-        Correct the flux balance in the map f (assumes that cells have equal area).
-        """
-    
-    # Compute positive and negative fluxes:
-    ipos = f > 0
-    ineg = f < 0
-    fluxp = np.abs(np.sum(f[ipos]))
-    fluxn = np.abs(np.sum(f[ineg]))
-    
-    # Rescale both polarities to mean:
-    fluxmn = 0.5*(fluxn + fluxp)
-    f1 = f.copy()
-    f1[ineg] *= fluxmn/fluxn
-    f1[ipos] *= fluxmn/fluxp
-    
-    return f1
-
-#--------------------------------------------------------------------------------
-def bmr2d(sc, pc, lat0, lon0, sep0, tilt0, B0, xithresh=9):
+    Generate pickle file listing SHARPs within a timeframe.
     """
-        Return magnetic field for 2d tilted magnetic bipole with peak strength B0.
-        **Note that all input angles should be in radians.
-        
-        In an untilted frame where the bipole is at the equator it has the form
-        Br = -B0*(lon/sep0)*exp[ 0.5*( 1 - xi )]
-        where xi = (lon**2 + 2*lat**2)/sep0**2
-        where the strength B1 is chosen so that the maximum of Br is B0.
-        
-        Note: cutoff based on threshold of xi.
-        """
-    
-    ns = np.size(sc)
-    nph = np.size(pc)
-    ds = sc[1] - sc[0]
-    dp = pc[1] - pc[0]
-    sc2, pc2 = np.meshgrid(sc, pc, indexing='ij')
-    sinc2 = np.sqrt(1 - sc2**2)
-    
-    # Cartesian coordinates:
-    x = np.cos(pc2)*sinc2
-    y = np.sin(pc2)*sinc2
-    z = sc2
-    
-    # Rotate to frame where BMR is on equator and untilted:
-    xb = x*np.cos(lat0)*np.cos(lon0) + y*np.cos(lat0)*np.sin(lon0) + z*np.sin(lat0)
-    yb = x*(-np.cos(tilt0)*np.sin(lon0) + np.sin(tilt0)*np.sin(lat0)*np.cos(lon0)) + y*(np.cos(tilt0)*np.cos(lon0) + np.sin(tilt0)*np.sin(lat0)*np.sin(lon0)) - z*np.sin(tilt0)*np.cos(lat0)
-    zb = x*(-np.sin(tilt0)*np.sin(lon0) - np.cos(tilt0)*np.sin(lat0)*np.cos(lon0)) + y*(np.sin(tilt0)*np.cos(lon0)-np.cos(tilt0)*np.sin(lat0)*np.sin(lon0)) + z*np.cos(tilt0)*np.cos(lat0)
-    zb[zb > 1] = 1
-    zb[zb < -1] = -1
-    
-    # Magnetic field of BMR in this frame:
-    thb = np.arccos(zb)
-    phb = np.arctan2(yb, xb)
-    xi = (phb**2 + 2*(0.5*np.pi-thb)**2)/sep0**2
-    brb = -B0*phb/sep0*np.exp(-xi)
-    
-    # Cutoff at threshold:
-    brb[xi > xithresh] = 0
-    msk = (xi <= xithresh).astype('int')
-    
-    # Remove any flux imbalance:
-    brb = correct_flux_multiplicative(brb)
-    
-    return brb, msk
 
+    # Start time:
+    cr_start = int(carrington_rotation_number(t_start))
+
+    # Identify all SHARP regions present within simulation timeframe:
+    # [cache in pickle file for later use]
+    try:
+        if (restart):
+            picklefile = open(outputpath+'sharps.p','rb')
+            picklefile.close()
+            print('Reading pre-computed SHARPs from sharps.p')
+    except:
+        restart = False
+    if (restart == False):
+        sharps, t_rec, t_em = getSHARPs(t_start, t_end)
+        picklefile1 = open(outputpath+'sharps.p','wb')
+        pickle.dump(sharps, picklefile1)
+        pickle.dump(t_rec, picklefile1)
+        pickle.dump(t_em, picklefile1)
+        picklefile1.close()
+        
 #--------------------------------------------------------------------------------
 def getSHARPs(t_start, t_end):
     """
@@ -414,11 +549,11 @@ def getSHARPs(t_start, t_end):
     Returns (1) sorted list of SHARP numbers, (2) timestamp of frame, and (3) corresponding
     emergence time (next noon) as a datetime object.
     """
-    print('Identifying SHARPs to be considered...')
 
     # Identify SHARP numbers in time range:
     t1 = t_start.strftime('%Y.%m.%d_%H:%M:%S')
     t2 = t_end.strftime('%Y.%m.%d_%H:%M:%S')
+    print('Identifying SHARPs to be considered between '+t1+' and '+t2+'...')
     c = drms.Client()
     k = c.query('hmi.sharp_cea_720s[]['+t1+'-'+t2+'@1d]', key='HARPNUM, T_REC')
     try:
@@ -448,35 +583,49 @@ def getSHARPs(t_start, t_end):
 
     print('Number of SHARPs to consider: %i' % len(sharps))
     return sharps, t_rec, t_em
-
+    
 #--------------------------------------------------------------------------------
-def SHARPtime(sharpnum):
+def readmap(rot):
     """
-    For a given SHARP, return (1) timestamp of closest frame to central meridian, and (2) corresponding emergence time (next noon) as a datetime object.
+        Reads the synoptic map for Carrington rotation rot.
+        [no flux correction etc, so just for display]
+        
+        ARGUMENTS:
+            rot is the number of the required Carrington rotation (e.g. 2190)
     """
     
-    # Get time series of longitudes of this SHARP (0 is central meridian):
-    c = drms.Client()
-    k = c.query('hmi.sharp_cea_720s[%i][]' % sharpnum, key='HARPNUM, T_REC, LON_FWT')
+    # (1) READ IN DATA
+    # ----------------
+    # The seg='Mr_polfil' downloads the polar field corrected data --> without NaN values and errors due to projection effect
+    # Read "Polar Field Correction for HMI Line-of-Sight Synoptic Data" by Xudong Sun, 2018 to know more
+    # Link: https://arxiv.org/pdf/1801.04265.pdf
+    try:
+        c = drms.Client()
+        seg = c.query(('hmi.synoptic_mr_polfil_720s[%4.4i]' % rot), seg='Mr_polfil')
+    except:
+        print('Error downloading HMI synoptic map -- required rotation: %4.4i' % rot)
+    
+    # Extract data array: (data is stored in 2nd slot with No. 1 and not in the PRIMARY (No. 0), thus [1].data)
+    # typical file structure:
+    # No.    Name      Ver    Type        Cards   Dimensions     Format
+    # 0     PRIMARY    1   PrimaryHDU       6     ()
+    # 1                1   CompImageHDU     13    (3600, 1440)   int32
+    brm = (fits.open('http://jsoc.stanford.edu' + seg.Mr_polfil[0]))[1].data
 
-    # Find record closest to central meridian:
-    rec_cm = k.LON_FWT.abs().idxmin()
-    k_cm = k.loc[rec_cm]
-
-    t_cm = drms.to_datetime(k.T_REC[rec_cm])
-
-    # Identify emergence (completion) time - next noon:
-    twelve_hrs = datetime.timedelta(hours=12)
-    t_em = t_cm + twelve_hrs
-    t_em = t_em.replace(hour=12, minute=0, second=0)
-
-    return k.T_REC[rec_cm], t_em
-
-
+    # Coordinates of original map:
+    nsm = np.size(brm, axis=0)
+    npm = np.size(brm, axis=1)
+    dsm = 2.0/nsm
+    dpm = 2*np.pi/npm
+    scm = np.linspace(-1 + 0.5*dsm, 1 - 0.5*dsm, nsm)
+    pcm = np.linspace(0.5*dpm, 2*np.pi - 0.5*dpm, npm)
+                
+    return brm, scm, pcm
+        
 #--------------------------------------------------------------------------------
 def readSHARP(sharpnum, t_cm, ns, nph, sm=4, nocomp=False):
     """
-    Read magnetogram for SHARP region at specified time, and map to dumfric grid. Return br array and imbalance fraction (0 = flux balanced, 1 = unipolar).
+    Read magnetogram for SHARP region at specified time, and map to computational grid. Return br array and imbalance fraction (0 = flux balanced, 1 = unipolar).
     
     Currently used B-LOS.
     
@@ -522,7 +671,7 @@ def readSHARP(sharpnum, t_cm, ns, nph, sm=4, nocomp=False):
     # Smooth with Gaussian filter:    
     blos = gauss(blos, sm)
     
-    # Interpolate to global map in dumfric coordinates:
+    # Interpolate to global map in computational coordinates:
     pcm = np.deg2rad(lon)
     scm = np.sin(np.deg2rad(lat))
     
@@ -554,43 +703,28 @@ def readSHARP(sharpnum, t_cm, ns, nph, sm=4, nocomp=False):
     return br, pcen, imbalance, k
 
 #--------------------------------------------------------------------------------
-def readmap(rot):
+def SHARPtime(sharpnum):
     """
-        Reads the synoptic map for Carrington rotation rot.
-        [no flux correction etc, so just for display]
-        
-        ARGUMENTS:
-            rot is the number of the required Carrington rotation (e.g. 2190)
+    For a given SHARP, return (1) timestamp of closest frame to central meridian, and (2) corresponding emergence time (next noon) as a datetime object.
     """
     
-    # (1) READ IN DATA
-    # ----------------
-    # The seg='Mr_polfil' downloads the polar field corrected data --> without NaN values and errors due to projection effect
-    # Read "Polar Field Correction for HMI Line-of-Sight Synoptic Data" by Xudong Sun, 2018 to know more 
-    # Link: https://arxiv.org/pdf/1801.04265.pdf    
-    try:
-        c = drms.Client()
-        seg = c.query(('hmi.synoptic_mr_polfil_720s[%4.4i]' % rot), seg='Mr_polfil')     
-    except:
-        print('Error downloading HMI synoptic map -- required rotation: %4.4i' % rot)
+    # Get time series of longitudes of this SHARP (0 is central meridian):
+    c = drms.Client()
+    k = c.query('hmi.sharp_cea_720s[%i][]' % sharpnum, key='HARPNUM, T_REC, LON_FWT')
+
+    # Find record closest to central meridian:
+    rec_cm = k.LON_FWT.abs().idxmin()
+    k_cm = k.loc[rec_cm]
+
+    t_cm = drms.to_datetime(k.T_REC[rec_cm])
+
+    # Identify emergence (completion) time - next noon:
+    twelve_hrs = datetime.timedelta(hours=12)
+    t_em = t_cm + twelve_hrs
+    t_em = t_em.replace(hour=12, minute=0, second=0)
+
+    return k.T_REC[rec_cm], t_em
     
-    # Extract data array: (data is stored in 2nd slot with No. 1 and not in the PRIMARY (No. 0), thus [1].data)
-    # typical file structure:
-    # No.    Name      Ver    Type        Cards   Dimensions     Format
-    # 0     PRIMARY    1   PrimaryHDU       6     ()      
-    # 1                1   CompImageHDU     13    (3600, 1440)   int32
-    brm = (fits.open('http://jsoc.stanford.edu' + seg.Mr_polfil[0]))[1].data
-
-    # Coordinates of original map:
-    nsm = np.size(brm, axis=0)
-    npm = np.size(brm, axis=1)
-    dsm = 2.0/nsm
-    dpm = 2*np.pi/npm
-    scm = np.linspace(-1 + 0.5*dsm, 1 - 0.5*dsm, nsm)  
-    pcm = np.linspace(0.5*dpm, 2*np.pi - 0.5*dpm, npm)  
-                
-    return brm, scm, pcm
-
 #--------------------------------------------------------------------------------
 class SFT1:
     """
@@ -654,122 +788,3 @@ class SFT1:
                 self.br += self.dt/self.ds*(f[1:] - f[:-1]) - self.dt/self.tau*self.br
             else:
                 self.br += self.dt/self.ds*(f[1:] - f[:-1])
-
-#--------------------------------------------------------------------------------
-def evolve_forward(outputpath, sharpsfile, repeatfile, eta=466.8, v0=15.5e-3, p=2.33, outfile='bmrsharps_evol.txt', plots=True):
-
-    # GET LIST OF GOOD SHARPS:
-    # - read full data:
-    dat0 = np.loadtxt(outputpath+sharpsfile, skiprows=5, delimiter='\t', dtype={'names':('SHARP', 'NOAA', 'CM time', 'Latitude', 'Carr-Longitude', 'Unsgnd flux', 'Imbalance', 'Good', 'Dipole', 'Bip-Separation', 'Bip-Tilt', 'Bip-Dipole'), 'formats':('i4', 'i4', 'S10', 'f8', 'f8', 'f8', 'f8', 'i4', 'f8', 'f8', 'f8', 'f8')})
-
-    t0 = np.array([datetime.datetime.strptime(dat0['CM time'][i].decode('UTF-8'), '%Y-%m-%d') for i in range(len(dat0))])
-    years0 = np.array([tt.year for tt in t0])
-    # - remove bad regions:
-    t1 = t0[dat0['Good']==1]
-    years1 = years0[dat0['Good']==1]
-    dat1 = dat0[dat0['Good']==1]
-    # - remove repeats:
-    repdat = np.loadtxt(outputpath+repeatfile, skiprows=2, delimiter='\t', dtype={'names':('reg1', 'reg2'), 'formats':('i4', 'i4')})
-    uniq = np.full(np.size(t1), True)
-    for k, sharpnum in enumerate(dat1['SHARP']):
-        if np.isin(sharpnum, repdat['reg2']):   # repeated region
-            uniq[k] = False
-    t = t1[uniq]
-    years = years1[uniq]
-    dat = dat1[uniq]
-
-    sharps = ['sharp%5.5i.nc' % k for k in dat['SHARP']]
-    sharps.sort()
-    print('NUMBER OF REGIONS: %i' % len(sharps))
-     
-    # Read in first region file to get resolution and set up flux transport object:
-    fh = netcdf.netcdf_file(outputpath+sharps[0], 'r', mmap=False)
-    br0 = fh.variables['br'][:]
-    fh.close()
-    ns, nph = np.shape(br0)
-    print('ns = %i, nph = %i' % (ns, nph))
-
-    sft = SFT1(ns)
-    sftbip = SFT1(ns)
-
-    # Initialize meridional flow, diffusion and decay:
-    tau = 0
-    def vs(s, v0=v0, p=p):
-        Du = v0*(1+p)**(0.5*(p+1))/p**(0.5*p)
-        return Du*s*(np.sqrt(1 - s**2))**p
-    sft.prep_sft(vs, eta, tau)
-    sftbip.prep_sft(vs, eta, tau)
-
-    # Prepare new ASCII file:
-    # - Load previous ASCII file:
-    dat = np.loadtxt(outputpath+sharpsfile, skiprows=5, usecols=(0,1,2,3,4,5,6,7,8,9,10,11), delimiter='\t', dtype={'names':('SHARP', 'NOAA', 'CM time', 'Latitude', 'Carr-Longitude', 'Unsgnd flux', 'Imbalance', 'Good', 'Dipole', 'Bip-Separation', 'Bip-Tilt', 'Bip-Dipole'), 'formats':('i4', 'i4', 'S10', 'f8', 'f8', 'f8', 'f8', 'i4', 'f8', 'f8', 'f8', 'f8')})
-    # - Get header rows:
-    with open(outputpath+sharpsfile) as myfile:
-        heads = [next(myfile) for x in range(5)]
-    # - Create new ASCII file incorporating evolution information:
-    newfile = open(outputpath+outfile, 'w')
-    newfile.write(heads[0])
-    newfile.write('-- Produced by anthony.yeates[at]durham.ac.uk --\n')
-    newfile.write('%i\n' % (len(sharps)))
-    newfile.write(heads[1])
-    newfile.write(heads[2])
-    newfile.write('Last two columns use 10-year 1D SFT simulation with eta=%g km^2/s, v0=%g km/s, p=%g, no decay term.\n' % (eta, v0, p))
-    newfile.write('------------------------------------------------------\n')
-    heads[4] = 'SHARP\tNOAA\tCM time\t\tLatitude\tCarr-Longitude\tUnsgnd flux\tImbalance\tDipole\t\tBip-Separation\tBip-Tilt\tBip-Dipole\n'  # remove Good column
-    newfile.write(heads[4][:-1]+'\tPred-Dip-Real\tPred-Dip-Bip\n')
-
-    # Run simulations for each good SHARP:
-    for sharp in sharps:
-        fh = netcdf.netcdf_file(outputpath+sharp, 'r', mmap=False)
-        try:
-            brb = fh.variables['br_bipole'][:]
-            print(sharp,np.max(brb))
-            good = True   # a bipole array was only created if it was a "good" SHARP
-        except:
-            good = False
-        if (good):
-            print(sharp)
-            # Simulate evolution of bipole approximation:
-            sftbip.setbr(np.mean(brb, axis=1))
-                   
-            Dmbip = [1.5*np.sum(sftbip.br*sftbip.sc*sftbip.ds)]
-            for k in range(10*365):
-                sftbip.evolve(sftbip.ndt*1)
-                Dmbip.append(1.5*np.sum(sftbip.br*sftbip.sc*sftbip.ds))
-                
-            # Simulate evolution of original region:
-            br0 = fh.variables['br'][:]
-            sft.setbr(np.mean(br0, axis=1))
-            Dm = [1.5*np.sum(sft.br*sft.sc*sft.ds)]
-            t = [0]
-            for k in range(10*365):
-                sft.evolve(sft.ndt*1)
-                Dm.append(1.5*np.sum(sft.br*sft.sc*sft.ds))
-                t.append(k/365.)
-                
-            if (plots):
-                plt.figure(figsize=(6,4))
-                plt.plot(t, Dm, 'tab:blue', label='Original Br')
-                plt.plot(t, Dmbip, 'tab:red', label='Bipole')
-                dmax = max([np.max(np.abs(Dm)), np.max(np.abs(Dmbip))])
-                plt.ylim(-dmax, dmax)
-                plt.xlim(t[0], t[-1])
-                plt.plot([t[0], t[-1]], [0,0], 'k-', linewidth=0.5)
-                plt.xlabel('Years')
-                plt.ylabel('Dipole')
-                plt.title('SHARP '+sharp[5:10])
-                plt.legend()
-                plt.savefig(outputpath+'Devol_'+sharp[5:10]+'.png', bbox_inches='tight')
-            
-            Df = Dm[-1]
-            Dfbip = Dmbip[-1]
-        else:
-            Df = 0
-            Dfbip = 0
-        
-        k = np.where(dat['SHARP'] == int(sharp[5:10]))[0]
-        newfile.write('%i\t%i\t%s\t%8.5f\t%8.5f\t%8.5e\t%8.5f\t%8.5e\t%8.5e\t%8.5e\t%8.5e\t%8.5e\t%8.5e\n' % (dat['SHARP'][k], dat['NOAA'][k], dat['CM time'][k][0].decode('UTF-8'), dat['Latitude'][k], dat['Carr-Longitude'][k], dat['Unsgnd flux'][k], dat['Imbalance'][k], dat['Dipole'][k], dat['Bip-Separation'][k], dat['Bip-Tilt'][k], dat['Bip-Dipole'][k], Df, Dfbip))
-
-        fh.close()
-        
-    newfile.close()
