@@ -22,9 +22,6 @@ nph = 360
 t_start = datetime.datetime(2010, 7, 1, 00)
 t_end = datetime.datetime(2010, 9, 1, 00)
 
-starttime = t_start.strftime('%Y%m%d.%H')
-endtime = t_end.strftime('%Y%m%d.%H')
-
 # Path to output directory [with trailing slash]:
 outputpath = './SHARPs1/'
 
