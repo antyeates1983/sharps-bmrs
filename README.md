@@ -54,6 +54,10 @@ Be aware that the code will take some time to run if you are trying to cover lon
 
 By default the code is set up to run for a two-month period, and the corresponding `allsharps.txt`, `repeatpairs.txt` and `bmrsharps_evol.txt` files are provided here for verification.
 
+### Note
+
+There is also a script `update_latest.py` for extending an existing database to a later end date.
+
 ## Author
 
 *A.R. Yeates - Durham University, UK*
