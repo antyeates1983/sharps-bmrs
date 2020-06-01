@@ -1,0 +1,3 @@
+List of pairs of repeat SHARPs with repeat_threshold=1
+-- Produced by anthony.yeates[at]durham.ac.uk --
+92	135
