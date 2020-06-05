@@ -7,7 +7,7 @@ This Python code generates a database of bipolar magnetic regions by automated a
 
 Full details of the purpose and design of the code are given in the paper <a href="">A.R. Yeates, How good is the bipolar approximation of active regions for surface flux transport? (in preparation)</a>.
 
-If you just want to use the BMR data without downloading and running the Python code, a version of `bmrharps_evol.txt` (see below) is maintained at the <a href="">Solar Dynamo Dataverse</a>.
+If you just want to use the BMR data without downloading and running the Python code, a version of `bmrharps_evol.txt` (see below) will be maintained at the <a href="">Solar Dynamo Dataverse</a>.
 
 ## Credit
 
