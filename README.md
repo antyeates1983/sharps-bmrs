@@ -5,13 +5,13 @@ Python code for automated extraction of bipolar magnetic regions from the HMI/SH
 
 This Python code generates a database of bipolar magnetic regions by automated analysis of the <a href="http://jsoc.stanford.edu/doc/data/hmi/sharp/sharp.htm">Spaceweather HMI Active Region Patch (SHARP) data</a>. The original data are pulled in automatically using <a href="https://sunpy.org">sunpy</a> and are provided by the <a href="http://hmi.stanford.edu">Helioseismic and Magnetic Imager</a> on Solar Dynamics Observatory.
 
-Full details of the purpose and design of the code are given in the paper <a href="">A.R. Yeates, How good is the bipolar approximation of active regions for surface flux transport? (in preparation)</a>.
+Full details of the purpose and design of the code are given in the paper <a href="https://link.springer.com/article/10.1007/s11207-020-01688-y?wt_mc=Internal.Event.1.SEM.ArticleAuthorIncrementalIssue">A.R. Yeates, How good is the bipolar approximation of active regions for surface flux transport? (<i>Solar Physics</i> <b>295</b>, 119, 2020)</a>.
 
 If you just want to use the BMR data without downloading and running the Python code, a version of `bmrharps_evol.txt` (see below) will be maintained at the <a href="">Solar Dynamo Dataverse</a>.
 
 ## Credit
 
-If you use the code or the derived data in your published work, please cite the accompanying paper [under review].
+If you use the code or the derived data in your published work, please cite the above paper.
 
 ## Dependencies
 
