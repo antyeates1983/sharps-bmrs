@@ -4,7 +4,7 @@
 
     Note that we use the **definitive** SHARP data series, so we never need to modify a SHARP that is already in our database.
 
-    A.R Yeates, Durham University, 1/6/20
+    A.R Yeates, Durham University, updated Jul-2021
 """
 import os
 import datetime
@@ -14,11 +14,11 @@ import sharptools
 import pickle
 
 # Database to be extended:
-outputpath = './SHARPs1/'
+outputpath = '/Users/bmjg46/Documents/SHARPs3/'
 
 # New end date:
-t_newend = datetime.datetime.combine(datetime.date.today(), datetime.time(23,59,59))
-#t_newend = datetime.datetime(2010, 9, 5, 00)
+#t_newend = datetime.datetime.combine(datetime.date.today(), datetime.time(23,59,59))
+t_newend = datetime.datetime(2010, 9, 1, 00)
 
 #--------------------------------------------------------
 # Read parameters from allsharps.txt and repeatpairs.txt:
@@ -31,7 +31,11 @@ with open(outputpath+'allsharps.txt', 'r') as file1:
 ns, nph = int(head2[2]), int(head2[4].split(',')[0])
 t_start = datetime.datetime.strptime(head1[2]+head1[3], '%Y-%m-%d%H:%M:%S')
 t_end = datetime.datetime.strptime(head1[5]+head1[6], '%Y-%m-%d%H:%M:%S\n')
-sharps_smoothing = int(head2[-1])
+print(head2)
+sharps_smoothing = int(head2[7].split(',')[0])
+magtype = head2[10].split(',')[0]
+method = head2[13].split(',')[0]
+maxlon = int(head2[-1])
 imbalance_threshold = float(head3[-1])
 with open(outputpath+'repeatpairs.txt', 'r') as file1:
     head1 = file1.readline().split('=')
@@ -45,7 +49,7 @@ t_em = pickle.load(picklefile)
 picklefile.close()
 
 # Identify new SHARPs and append to lists:
-sharps1, t_rec1, t_em1 = sharptools.getSHARPs(t_end, t_newend)
+sharps1, t_rec1, t_em1 = sharptools.getSHARPs(t_end, t_newend, discardfile=outputpath+'limb_discards.txt')
 for k,sharp1 in enumerate(sharps1):
     if ((sharp1 in sharps)==False):
         print(sharp1, t_rec1[k], t_em1[k])
@@ -63,7 +67,7 @@ picklefile1.close()
 #===========================================================
 
 # Read magnetograms for individual SHARPs and fit BMRs where possible:
-sharptools.get_bmrs(outputpath, 'allsharps.txt', t_start, t_end, ns, nph, sharps_smoothing, imbalance_threshold, bmr_a, restart, plots=True)
+sharptools.get_bmrs(outputpath, 'allsharps.txt', t_start, t_end, ns, nph, sharps_smoothing, imbalance_threshold, bmr_a, restart, plots=True, magtype=magtype, method=method, maxlon=maxlon)
 
 # Determine repeated regions:
 # [this considers also pairs where the first is in the existing data]

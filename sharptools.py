@@ -1,7 +1,7 @@
 """
     Python module with routines associated to sharps-bmrs.
     
-    A.R. Yeates, Durham University, 1/6/20
+    A.R. Yeates, Durham University, updated Jul-2021
 """
 import sys
 import numpy as np
@@ -10,8 +10,7 @@ from matplotlib import gridspec
 from astropy.io import fits
 import sunpy.map
 from sunpy.coordinates.sun import carrington_rotation_number
-from sunpy.coordinates import get_sun_L0
-from scipy.interpolate import interp2d
+from scipy.interpolate import interp2d, griddata
 from scipy.io import netcdf
 from scipy.ndimage.filters import gaussian_filter as gauss
 import drms
@@ -224,7 +223,8 @@ def evolve_forward(outputpath, sharpsfile, repeatfile, eta=466.8, v0=15.5e-3, p=
                 plt.title('SHARP '+sharp[5:10])
                 plt.legend()
                 plt.savefig(outputpath+'Devol_'+sharp[5:10]+'.png', bbox_inches='tight')
-            
+                plt.close()
+                
             Df = Dm[-1]
             Dfbip = Dmbip[-1]
         else:
@@ -240,7 +240,7 @@ def evolve_forward(outputpath, sharpsfile, repeatfile, eta=466.8, v0=15.5e-3, p=
 
     
 #--------------------------------------------------------------------------------
-def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smoothing=4, imbalance_threshold=0.5, bmr_a=0.56, restart=True, plots=False):
+def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smoothing=4, imbalance_threshold=0.5, bmr_a=0.56, restart=True, plots=False, magtype='los', method='cm', maxlon=90):
     """
     Read magnetograms for list of SHARPs in pre-existing pickle file, and fit BMRs to those
     that are "good" (see paper). Saves output to text file.
@@ -278,7 +278,7 @@ def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smo
     if (restart == False):
         allfile = open(outputpath+outputfile, 'w')
         allfile.write('SHARPs from %s to %s\n' % (t_start, t_end))
-        allfile.write('Grid resolution: %i x %i, smoothing_param = %i\n' % (ns, nph, sharps_smoothing))
+        allfile.write('Grid resolution: %i x %i, smoothing_param = %i, magtype = %s, method = %s, maxlon = %i\n' % (ns, nph, sharps_smoothing, magtype, method, maxlon))
         allfile.write('Selection criteria: (i) sep > %g deg,  (ii) |imbalance| <  %g\n' % (np.rad2deg(dph), imbalance_threshold))
         allfile.write('\n')
         allfile.write('SHARP\tNOAA\tCM time\t\tLatitude\tCarr-Longitude\tUnsgnd flux\tImbalance\tGood\tDipole\t\tBip-Separation\tBip-Tilt\tBip-Dipole\n')
@@ -293,7 +293,7 @@ def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smo
     for k in range(krestart, len(sharps)):
         print(t_em[k], sharps[k])
         # - generate Br map for SHARP, and record imbalance (before correction):
-        br1, pcen1, imbalance, keys = readSHARP(sharps[k], t_rec[k], ns, nph, sm=sharps_smoothing)
+        br1, pcen1, imbalance, keys = readSHARP(sharps[k], t_rec[k], ns, nph, sm=sharps_smoothing, magtype=magtype)
         flux1 = np.sum(np.abs(br1))
         # - get overall centroid position:
         ph1 = np.sum(np.abs(br1)*pc2)/np.sum(np.abs(br1)) + pcen1 - np.pi
@@ -330,18 +330,14 @@ def get_bmrs(outputpath, outputfile, t_start, t_end, ns=180, nph=360, sharps_smo
             plt.clf()
             ax = plt.subplot(211)
             lat = 0.5*np.pi - np.arccos(sc)
-            pm = ax.pcolormesh(np.rad2deg(pc), np.rad2deg(lat), br1, cmap='bwr')
-            pm.set_clim(vmin=-bmax, vmax=bmax)
+            pm = ax.pcolormesh(np.rad2deg(pc), np.rad2deg(lat), br1, cmap='bwr', vmin=-bmax, vmax=bmax)
             plt.title('Time %s -- SHARP %i, NOAA %i, FLUX = %g' % (t_em[k], sharps[k], keys.NOAA_AR, flux1*ds*dph*(6.96e10)**2))
             cb1 = plt.colorbar(pm)
-            cb1.set_clim(vmin=-bmax, vmax=bmax)
             if (good):
                 ax = plt.subplot(212)
                 lat = 0.5*np.pi - np.arccos(sc)
-                pm = ax.pcolormesh(np.rad2deg(pc), np.rad2deg(lat), brb, cmap='bwr')
-                pm.set_clim(vmin=-bmax, vmax=bmax)
+                pm = ax.pcolormesh(np.rad2deg(pc), np.rad2deg(lat), brb, cmap='bwr', vmin=-bmax, vmax=bmax)
                 cb1 = plt.colorbar(pm)
-                cb1.set_clim(vmin=-bmax, vmax=bmax)
                 ax.set_title('D(orig) = %g, D(BMR) = %g, sep = %1.2f, imb = %1.3f' % (ax_sharp, ax_bmr, np.rad2deg(sep0), imbalance))
             plt.tight_layout()
             if (good):
@@ -526,15 +522,20 @@ def get_pair_overlaps(outputpath, sharpsfile, repeat_threshold=1, outfile='repea
     repeatfile.close()
     
 #--------------------------------------------------------------------------------
-def get_sharps(outputpath, t_start, t_end, restart=True):
+def get_sharps(outputpath, t_start, t_end, restart=True, method='cm', maxlon=90):
     """
     Generate pickle file listing SHARPs within a timeframe.
+    Set method='cm' to choose frames closest to Central Meridian, or
+    method='maxflux' to choose frames with the maximum unsigned flux.
+    
+    Parameter maxlon sets the maximum E-W distance from Central Meridian to include (in degrees).
     """
 
     # Start time:
     cr_start = int(carrington_rotation_number(t_start))
 
-    # Identify all SHARP regions present within simulation timeframe:
+    # Identify all SHARP regions present within simulation timeframe,
+    # with at least one frame within +=maxlon of Central Meridian:
     # [cache in pickle file for later use]
     try:
         if (restart):
@@ -544,7 +545,7 @@ def get_sharps(outputpath, t_start, t_end, restart=True):
     except:
         restart = False
     if (restart == False):
-        sharps, t_rec, t_em = getSHARPs(t_start, t_end)
+        sharps, t_rec, t_em = getSHARPs(t_start, t_end, method=method, maxlon=maxlon, discardfile=outputpath+'limb_discards.txt')
         picklefile1 = open(outputpath+'sharps.p','wb')
         pickle.dump(sharps, picklefile1)
         pickle.dump(t_rec, picklefile1)
@@ -552,12 +553,13 @@ def get_sharps(outputpath, t_start, t_end, restart=True):
         picklefile1.close()
         
 #--------------------------------------------------------------------------------
-def getSHARPs(t_start, t_end):
+def getSHARPs(t_start, t_end, method='cm', maxlon=90, discardfile=''):
     """
-    Identify all SHARPs within given time range and identify timestamp of their closest
-    frame to central meridian.
-    Returns (1) sorted list of SHARP numbers, (2) timestamp of frame, and (3) corresponding
-    emergence time (next noon) as a datetime object.
+    Identify all SHARPs within given time range and identify individual timestamp, with at least one frame within +-maxlon of Central Meridian.
+    Set method='cm' to choose frames closest to Central Meridian, or
+    method='maxflux' to choose frames with the maximum unsigned flux.
+    Returns (1) sorted list of SHARP numbers, (2) timestamp of frame, and (3) corresponding emergence time (next noon) as a datetime object.
+    List of SHARPs failing the maxlon test is written to discardfile.
     """
 
     # Identify SHARP numbers in time range:
@@ -573,17 +575,25 @@ def getSHARPs(t_start, t_end):
         print('ERROR: no SHARPs found in time range.')
         sys.exit()
 
-    # Find closest time to central meridian for each HARP and corresponding "emergence time":
+    # Initialize discard file:
+    dfile = open(discardfile, 'w')
+    dfile.write('List of SHARPs discarded due to Central Meridian distance > %g\n' % maxlon)
+    
+    # Find single "emergence time" for each SHARP:
     t_rec = []
     t_em = []
     sharps = []
     for h in sharps1:
         print(h)
-        t_rec1, t_em1 = SHARPtime(h)
-        if (t_em1 >= t_start):
+        t_rec1, t_em1, ivalid = SHARPtime(h, method=method, maxlon=maxlon)
+        if ((t_em1 >= t_start) & (ivalid)):
             t_rec.append(t_rec1)
             t_em.append(t_em1)
             sharps.append(h)
+        if (not ivalid):
+            # Write to discard file:
+            dfile.write('%i\n' % (h))
+    dfile.close()
 
     # Sort into order:
     idx = sorted(range(len(t_em)), key=t_em.__getitem__)
@@ -633,7 +643,7 @@ def readmap(rot):
     return brm, scm, pcm
         
 #--------------------------------------------------------------------------------
-def readSHARP(sharpnum, t_cm, ns, nph, sm=4, nocomp=False):
+def readSHARP(sharpnum, t_cm, ns, nph, sm=4, nocomp=False, magtype='los', coords='full'):
     """
     Read magnetogram for SHARP region at specified time, and map to computational grid. Return br array and imbalance fraction (0 = flux balanced, 1 = unipolar).
     
@@ -644,6 +654,11 @@ def readSHARP(sharpnum, t_cm, ns, nph, sm=4, nocomp=False):
     
     If nocomp=True, just returns original HMI magnetogram and mask arrays.
     
+    Set magtype='los' for line-of-sight magnetograms, or magtype='br' to use radial-component (from vector-B) magnetograms. L-O-S shouldn't be used if the SHARPs are selected at their time of maximum flux, as it will give spurius data near the limb.
+    
+    Set coords='full' to account fully for CEA coordinate mapping used by HMI.
+    Default is to assume that x, y in the HMI coordinates are just longitude and latitude.
+    
     Outputs:
         br -- magnetogram with only this region (shifted to 180 degrees longitude)
         pcen -- amount of longitudinal shift
@@ -653,55 +668,103 @@ def readSHARP(sharpnum, t_cm, ns, nph, sm=4, nocomp=False):
     
     # Get time series of longitudes of this SHARP region (0 is central meridian):
     c = drms.Client()
-    k, seg = c.query(('hmi.sharp_cea_720s[%i]' % sharpnum)+'['+t_cm+']', key='USFLUX, CRPIX1, CRVAL1, CRPIX2, CRVAL2, CDELT1, CDELT2, NOAA_AR, AREA', seg='BITMAP, MAGNETOGRAM')
+    if (magtype=='los'):
+        k, seg = c.query(('hmi.sharp_cea_720s[%i]' % sharpnum)+'['+t_cm+']', key='USFLUX, CRPIX1, CRVAL1, CRPIX2, CRVAL2, CDELT1, CDELT2, NOAA_AR, AREA', seg='BITMAP, MAGNETOGRAM')
+    if (magtype=='br'):
+        k, seg = c.query(('hmi.sharp_cea_720s[%i]' % sharpnum)+'['+t_cm+']', key='USFLUX, CRPIX1, CRVAL1, CRPIX2, CRVAL2, CDELT1, CDELT2, NOAA_AR, AREA', seg='BITMAP, BR')
 
     # Download bounding data for region:
     im = fits.open('http://jsoc.stanford.edu' + seg.BITMAP[0]) 
     mask = im[0].data
     
-    # Download l-o-s magnetogram data:
-    im = fits.open('http://jsoc.stanford.edu' + seg.MAGNETOGRAM[0]) 
-    blos = im[1].data
+    if (magtype=='los'):
+        # Download l-o-s magnetogram data:
+        im = fits.open('http://jsoc.stanford.edu' + seg.MAGNETOGRAM[0])
+        blos = im[1].data
+    if (magtype=='br'):
+        # Download Br data:
+        im = fits.open('http://jsoc.stanford.edu' + seg.BR[0])
+        blos = im[1].data
+        blos = np.nan_to_num(blos)  # set nan values to zero
+       
+    # Remove data outside SHARP masked region:
+    blos[mask < 30] = 0.0
+       
+    # Smooth with Gaussian filter:
+    blos = gauss(blos, sm)
        
     # Get heliographic (Carrington) coordinates of image:
     ny, nx = blos.shape
-    xmin = (1 - k.CRPIX1)*k.CDELT1 + k.CRVAL1
-    xmax = (nx - k.CRPIX1)*k.CDELT1 + k.CRVAL1
-    ymin = (1 - k.CRPIX2)*k.CDELT2 + k.CRVAL2
-    ymax = (ny - k.CRPIX2)*k.CDELT2 + k.CRVAL2    
-    lon = np.linspace(xmin+0.5*k.CDELT1, xmax-0.5*k.CDELT1, nx)
-    lat = np.linspace(ymin+0.5*k.CDELT2, ymax-0.5*k.CDELT2, ny)
-    
-    if (nocomp):
-        return mask, blos, lon, lat
-    
-    # Remove data outside SHARP masked region:
-    blos[mask < 30] = 0.0
-    
-    # Smooth with Gaussian filter:    
-    blos = gauss(blos, sm)
-    
-    # Interpolate to global map in computational coordinates:
-    pcm = np.deg2rad(lon)
-    scm = np.sin(np.deg2rad(lat))
-    
-    # Shift to Carrington longitude 180 (to avoid problems at edge of map later):
-    sc2, pc2 = np.meshgrid(scm, pcm, indexing='ij')
-    pcen = np.sum(np.abs(blos)*pc2)/np.sum(np.abs(blos))
-    scen = np.sum(np.abs(blos)*sc2)/np.sum(np.abs(blos))
-    pcm += np.pi - pcen    
-    
-    # Interpolate to the computational grid:
-    ds = 2.0/ns
-    dph = 2*np.pi/nph
-    sc = np.linspace(-1 + 0.5*ds, 1 - 0.5*ds, ns)  
-    pc = np.linspace(0.5*dph, 2*np.pi - 0.5*dph, nph)
-    
-    bri = interp2d(pcm, scm, blos, kind='cubic', copy=True, bounds_error=False, fill_value=0)
-    br = np.zeros((ns, nph))
-    for i in range(ns):
-        br[i,:] = bri(pc, sc[i]).flatten() + bri(pc + 2*np.pi, sc[i]).flatten() + bri(pc - 2*np.pi, sc[i]).flatten()
-    del(bri)
+    if (coords=='full'):
+        xmin = (1 - k.CRPIX1)*k.CDELT1
+        xmax = (nx - k.CRPIX1)*k.CDELT1
+        ymin = (1 - k.CRPIX2)*k.CDELT2
+        ymax = (ny - k.CRPIX2)*k.CDELT2
+        x = np.linspace(xmin+0.5*k.CDELT1, xmax-0.5*k.CDELT1, nx)
+        y = np.linspace(ymin+0.5*k.CDELT2, ymax-0.5*k.CDELT2, ny)
+        coslatc = np.cos(np.deg2rad(k.CRVAL2[0]))
+        sinlatc = np.sin(np.deg2rad(k.CRVAL2[0]))
+        yr, xr = np.meshgrid(np.deg2rad(y), np.deg2rad(x), indexing='ij')
+        lat = np.arcsin(coslatc*yr + sinlatc*np.sqrt(1-yr**2)*np.cos(xr))
+        lon = np.rad2deg(np.arcsin(np.sqrt(1-yr**2)*np.sin(xr)/np.cos(lat))) + k.CRVAL1[0]
+        lat = np.rad2deg(lat)
+
+        if (nocomp):
+            return mask, blos, lon, lat
+        
+        # Get s, phi coordinates of original map [and shift to Carrington
+        # longitude 180 to avoid problems at edge of map later]:
+        pcm = np.deg2rad(lon)
+        scm = np.sin(np.deg2rad(lat))
+        pcen = np.sum(np.abs(blos)*pcm)/np.sum(np.abs(blos))
+        scen = np.sum(np.abs(blos)*scm)/np.sum(np.abs(blos))
+        pcm += np.pi - pcen
+        points = np.stack((scm.flatten(), pcm.flatten()), axis=1)
+
+        # Define the computational grid:
+        ds = 2.0/ns
+        dph = 2*np.pi/nph
+        sc = np.linspace(-1 + 0.5*ds, 1 - 0.5*ds, ns)
+        pc = np.linspace(0.5*dph, 2*np.pi - 0.5*dph, nph)
+        sc2, pc2 = np.meshgrid(sc, pc, indexing='ij')
+
+        # Interpolate to the computational grid:
+        br = griddata(points, blos.flatten(), (sc2, pc2), method='cubic', fill_value=0)
+        br += griddata(points, blos.flatten(), (sc2, pc2 + 2*np.pi), method='cubic', fill_value=0)
+        br += griddata(points, blos.flatten(), (sc2, pc2 - 2*np.pi), method='cubic', fill_value=0)
+
+    else:
+        xmin = (1 - k.CRPIX1)*k.CDELT1 + k.CRVAL1
+        xmax = (nx - k.CRPIX1)*k.CDELT1 + k.CRVAL1
+        ymin = (1 - k.CRPIX2)*k.CDELT2 + k.CRVAL2
+        ymax = (ny - k.CRPIX2)*k.CDELT2 + k.CRVAL2
+        lon = np.linspace(xmin+0.5*k.CDELT1, xmax-0.5*k.CDELT1, nx)
+        lat = np.linspace(ymin+0.5*k.CDELT2, ymax-0.5*k.CDELT2, ny)
+        
+        if (nocomp):
+            return mask, blos, lon, lat
+        
+        # Get s, phi coordinates of original map [and shift to Carrington
+        # longitude 180 to avoid problems at edge of map later]:
+        pcm = np.deg2rad(lon)
+        scm = np.sin(np.deg2rad(lat))
+        scm2, pcm2 = np.meshgrid(scm, pcm, indexing='ij')
+        pcen = np.sum(np.abs(blos)*pcm2)/np.sum(np.abs(blos))
+        scen = np.sum(np.abs(blos)*scm2)/np.sum(np.abs(blos))
+        pcm += np.pi - pcen
+
+        # Define the computational grid:
+        ds = 2.0/ns
+        dph = 2*np.pi/nph
+        sc = np.linspace(-1 + 0.5*ds, 1 - 0.5*ds, ns)
+        pc = np.linspace(0.5*dph, 2*np.pi - 0.5*dph, nph)
+
+        # Interpolate to the computational grid:
+        bri = interp2d(pcm, scm, blos, kind='cubic', copy=True, bounds_error=False, fill_value=0)
+        br = np.zeros((ns, nph))
+        for i in range(ns):
+            br[i,:] = bri(pc, sc[i]).flatten() + bri(pc + 2*np.pi, sc[i]).flatten() + bri(pc - 2*np.pi, sc[i]).flatten()
+        del(bri)
 
     absflux = np.sum(np.abs(br))*ds*dph*(6.96e10)**2
     netflux = np.sum(br)*ds*dph*(6.96e10)**2
@@ -713,18 +776,35 @@ def readSHARP(sharpnum, t_cm, ns, nph, sm=4, nocomp=False):
     return br, pcen, imbalance, k
 
 #--------------------------------------------------------------------------------
-def SHARPtime(sharpnum):
+def SHARPtime(sharpnum, method='cm', maxlon=90):
     """
-    For a given SHARP, return (1) timestamp of closest frame to central meridian, and (2) corresponding emergence time (next noon) as a datetime object.
+    For a given SHARP, identify a single frame with (if possible) longitude centroid within +-maxlon of Central Meridian.
+    - If method='cm', use the frame with timestamp closest to central meridian.
+    - If method='maxflux', use the frame with maximum unsigned flux.
+    Returns (1) timestamp of chosen frame, and (2) corresponding emergence time (next noon) as a datetime object, and (3) ivalid flag True if valid frame exists and False if frame is outside +-maxlon.
     """
     
-    # Get time series of longitudes of this SHARP (0 is central meridian):
     c = drms.Client()
-    k = c.query('hmi.sharp_cea_720s[%i][]' % sharpnum, key='HARPNUM, T_REC, LON_FWT')
+    # Get time series of unsigned fluxes and longitudes of this SHARP (0 is central meridian):
+    k = c.query('hmi.sharp_cea_720s[%i][]' % sharpnum, key='HARPNUM, T_REC, USFLUXL, LON_FWT')
 
-    # Find record closest to central meridian:
-    rec_cm = k.LON_FWT.abs().idxmin()
-    k_cm = k.loc[rec_cm]
+    # Find individual record:
+    if (method=='cm'):
+        rec_cm = k.LON_FWT.abs().idxmin()
+        k_cm = k.loc[rec_cm]
+        if (np.abs(k.LON_FWT[rec_cm]) <= maxlon):
+            ivalid = True
+        else:
+            ivalid = False
+    if (method=='maxflux'):
+        usfluxl = k.USFLUXL.where(np.abs(k.LON_FWT) <= maxlon, other=0)
+        if (usfluxl.max() > 0):
+            rec_cm = usfluxl.abs().idxmax()
+            k_cm = k.loc[rec_cm]
+            ivalid = True
+        else:
+            rec_cm = 0
+            ivalid = False
 
     t_cm = drms.to_datetime(k.T_REC[rec_cm])
 
@@ -733,7 +813,7 @@ def SHARPtime(sharpnum):
     t_em = t_cm + twelve_hrs
     t_em = t_em.replace(hour=12, minute=0, second=0)
 
-    return k.T_REC[rec_cm], t_em
+    return k.T_REC[rec_cm], t_em, ivalid
     
 #--------------------------------------------------------------------------------
 class SFT1:
