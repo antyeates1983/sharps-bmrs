@@ -32,7 +32,7 @@ Various output files are produced at each stage of the script:
 SHARPs from 2010-07-01 00:00:00 to 2010-09-01 00:00:00
 -- Produced by anthony.yeates[at]durham.ac.uk --
 11
-Grid resolution: 180 x 360, smoothing_param = 4
+Grid resolution: 180 x 360, smoothing_param = 4, magtype = los, method = cm, maxlon = 90
 Selection criteria: (i) sep > 1 deg,  (ii) |imbalance| <  0.5
 Last two columns use 10-year 1D SFT simulation with eta=350 km^2/s, v0=0.015 km/s, p=2.33, no decay term.
 ------------------------------------------------------
@@ -57,6 +57,17 @@ By default the code is set up to run for a two-month period, and the correspondi
 ### Note
 
 There is also a script `update_latest.py` for extending an existing database to a later end date.
+
+### Changes in latest update (July 2021)
+
+Compared to the version of the code used in the paper, the latest update corrects an error and adds some new options (which are turned off in the default script).
+
+**Corrected error:** The coordinate mapping from SHARP ``CEA Longitude'' and ``CEA Latitude'' to regular Longitude and Latitude was only an approximation in the original version (with minor consequences). Now the code has been corrected to use the correct mapping, as given by Equation (3) of <a href="https://arxiv.org/abs/1309.2392">Sun</a>.
+
+**New options:**
+1. By setting `magtype=br` rather than `magtype=los`, the code will use the radial vector magnetogram component B_r rather than the line-of-sight magnetogram. Be aware that the two do not agree in the amount of magnetic flux.
+2. By setting `method=maxflux` rather than `method=cm`, the code will select the frame used for each SHARP at the time of maximum unsigned (line-of-sight) flux, namely SHARP keyword USFLUXL, rather than the time closest to central meridian. When using `method=maxflux`, it is not appropriate to use `magtype=los`, due to line-of-sight effects near the limb.
+3. By setting `maxlon` to a positive integer <90, the code will include only SHARPs that have at least one frame within +-maxlon east or west of central meridian. This allows one to exclude data near the limb.
 
 ## Author
 
